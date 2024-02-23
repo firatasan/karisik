@@ -1,0 +1,1771 @@
+sap.ui.define([
+  "is3s/pb/controller/BaseController",
+  "sap/ui/model/json/JSONModel",
+  "sap/ui/core/routing/History",
+  "is3s/pb/model/formatter",
+  "sap/ui/model/Filter",
+  "sap/ui/model/FilterOperator",
+  "sap/m/MessageBox"
+], function(BaseController, JSONModel, History, formatter, Filter, FilterOperator, MessageBox) {
+  "use strict";
+
+  return BaseController.extend("is3s.pb.controller.Worklist", {
+
+    formatter: formatter,
+    //_oLastDate: {},
+
+    /* =========================================================== */
+    /* lifecycle methods                                           */
+    /* =========================================================== */
+
+    /**
+     * Called when the worklist controller is instantiated.
+     * @public
+     */
+    onInit: function() {
+      var oViewModel,
+        iOriginalBusyDelay;
+
+      // Model used to manipulate control states
+      oViewModel = new JSONModel({
+        worklistTableTitle: this.getResourceBundle().getText("worklistTableTitle"),
+        saveAsTileTitle: this.getResourceBundle().getText("worklistViewTitle"),
+        shareOnJamTitle: this.getResourceBundle().getText("worklistViewTitle"),
+        shareSendEmailSubject: this.getResourceBundle().getText("shareSendEmailWorklistSubject"),
+        shareSendEmailMessage: this.getResourceBundle().getText("shareSendEmailWorklistMessage", [location.href]),
+        tableNoDataText: this.getResourceBundle().getText("tableNoDataText"),
+        tableBusyDelay: 0,
+        editable: false
+      });
+      this.setModel(oViewModel, "worklistView");
+
+      // Model für Appointment Fragment
+      var oAppModel = new JSONModel({
+        sAppModus: "show", //verfügbare Modi: show/edit/create
+        sPernrChange: "false", // true/false
+        sVkorg: "",
+        sDuration: "" //Dauer des Termins in Millisekunden
+
+      });
+      this.setModel(oAppModel, "appFragment");
+
+      //ABAP Push Channel Verbindung - funktioniert nicht
+      // jQuery.sap.require("sap.ui.core.ws.WebSocket");
+      // this.oWs = new sap.ui.core.ws.WebSocket("ws://vh01s0er3.netz.tuev-nord.de:8000/sap/bc/apc/tng/is_planboard");
+      //this.oWs = new sap.ui.core.ws.WebSocket("/sap/bc/apc/tng/is_planboard");
+
+      // Make sure, busy indication is showing immediately so there is no
+      // break after the busy indication for loading the view's meta data is
+      // ended (see promise 'oWhenMetadataIsLoaded' in AppController)
+
+    },
+
+    onAfterRendering: function() {
+
+      var oCalendar = this.getView().byId("PlanningCalendar");
+      var oCalWeek = this.getView().byId("CalendarWeek");
+
+      //oCalendar.fireStartDateChange();
+
+      // einmalig beim Start das Startdate setzen, nötig wenn die App nicht aus dem SAP gestartet wird
+      this._atStart();
+
+      // URL-parameter auswerten
+      this._onFilterparams();
+
+      //document.body.style.zoom = "70%";
+
+      // Button Heute - funktioniert für alle Viewsichten (Hours/Days/Week/Month)
+      // ID ist falsch.
+      // Alte : __component0---worklist--PlanningCalendar-Today
+      // Neue : __component0---worklist--PlanningCalendar-Header-NavToolbar-TodayBtn
+      sap.ui.getCore().byId("__component0---worklist--PlanningCalendar-Header-NavToolbar-TodayBtn").attachPress(
+        jQuery.proxy(
+          function() {
+            console.log("Today pressed!");
+
+            if (oCalendar) {
+              //heutiges Datum einfach mit: var oHeute = new Date();
+              var oDate = new Date();
+
+              if (oCalendar.getViewKey() === "D" || oCalendar.getViewKey() === "W") {
+                if (oDate.getDay() < 6 && oDate.getDay() !== 0) {
+                  oDate.setDate(oDate.getDate() - oDate.getDay() + 1);
+                } else if (oDate.getDay() === 6) {
+                  oDate.setDate(oDate.getDate() + 2);
+                } else if (oDate.getDay() === 0) {
+                  oDate.setDate(oDate.getDate() + 1);
+                }
+              } else if (oCalendar.getViewKey() === "H") {
+                oDate.setHours(7);
+                oDate.setMinutes(0);
+                oDate.setSeconds(0);
+              }
+              //else if (oCalendar.getViewKey() === "M") {
+
+              // }
+              oCalendar.setStartDate(oDate);
+              //Kalenderwoche
+              var sWeekNumber = this._getWeekNumber(oDate);
+              oCalWeek.setText(sWeekNumber);
+              console.log(sWeekNumber);
+            }
+          },
+          this
+        )
+      );
+
+      // Button previous - Stundenansicht
+      // ID ist falsch und gibt es keine "attachPressPrevious"  ===> "attachPress"
+      // Alte id : "__component0---worklist--PlanningCalendar-TimeInt--Head"
+      // Neu id  : "__component0---worklist--PlanningCalendar-Header-NavToolbar-PrevBtn"
+      sap.ui.getCore().byId("__component0---worklist--PlanningCalendar-Header-NavToolbar-PrevBtn").attachPress(
+        jQuery.proxy(
+          function() {
+            console.log("Previous Hours pressed!");
+            if (oCalendar.getViewKey() === "H") {
+              var oStartDate = oCalendar.getStartDate();
+              var iMilliSeconds = oStartDate.getTime();
+              var oNewDate = new Date(iMilliSeconds);
+
+              oNewDate.setHours(7);
+
+              oCalendar.setStartDate(oNewDate);
+              //Kalenderwoche
+              var sWeekNumber = this._getWeekNumber(oNewDate);
+              oCalWeek.setText(sWeekNumber);
+              console.log(sWeekNumber);
+            } else if (oCalendar.getViewKey() === "D" || oCalendar.getViewKey() === "W"){
+              var oStartDatePrev = oCalendar.getStartDate();
+              var iMilliSecondsPrev = oStartDatePrev.getTime();
+              var oNewDatePrev = new Date(iMilliSecondsPrev);
+              if (oStartDatePrev.getDay() < 6 && oStartDatePrev.getDay() !== 0) {
+                oNewDatePrev.setDate(oStartDatePrev.getDate() - oStartDatePrev.getDay() + 1);
+              } else if (oStartDatePrev.getDay() === 6) {
+                oNewDatePrev.setDate(oStartDatePrev.getDate() + 2);
+              } else if (oStartDatePrev.getDay() === 0) {
+                oNewDatePrev.setDate(oStartDatePrev.getDate() + 1);
+              }
+              oCalendar.setStartDate(oNewDatePrev);
+
+              //Kalenderwoche
+              var sWeekNumber = this._getWeekNumber(oNewDatePrev);
+              oCalWeek.setText(sWeekNumber);
+              console.log(sWeekNumber);
+            }
+          },
+          this
+        )
+      );
+
+      // in der Hours View "__component0---worklist--PlanningCalendar-TimeInt--Head
+      //in der Days View "__component0---worklist--PlanningCalendar-DateInt--Head
+      //in der Month View "__component0---worklist--PlanningCalendar-MonthInt--Head
+
+      // Button next - Stundensicht
+      // ID ist falsch und gibt es keine "attachPressNext"  ===> "attachPress"
+      // Alte Id : "__component0---worklist--PlanningCalendar-TimeInt--Head"
+      // Neue Id : "__component0---worklist--PlanningCalendar-Header-NavToolbar-NextBtn"
+      sap.ui.getCore().byId("__component0---worklist--PlanningCalendar-Header-NavToolbar-NextBtn").attachPress(
+        jQuery.proxy(
+          function() {
+            console.log("Next Hours pressed!");
+            if (oCalendar.getViewKey() === "H") {
+              var oStartDate = oCalendar.getStartDate();
+              var iMilliSeconds = oStartDate.getTime();
+              var oNewDate = new Date(iMilliSeconds);
+
+              oNewDate.setDate(oStartDate.getDate() + 1);
+              oNewDate.setHours(7);
+              oCalendar.setStartDate(oNewDate);
+
+              //Kalenderwoche
+              var sWeekNumber = this._getWeekNumber(oNewDate);
+              oCalWeek.setText(sWeekNumber);
+              console.log(sWeekNumber);
+            } else if (oCalendar.getViewKey() === "D" || oCalendar.getViewKey() === "W"){
+              var oStartDatePrev = oCalendar.getStartDate();
+              var iMilliSecondsPrev = oStartDatePrev.getTime();
+              var oNewDatePrev = new Date(iMilliSecondsPrev);
+              if (oStartDatePrev.getDay() < 6 && oStartDatePrev.getDay() !== 0) {
+                oNewDatePrev.setDate(oStartDatePrev.getDate() - oStartDatePrev.getDay() + 1);
+              } else if (oStartDatePrev.getDay() === 6) {
+                oNewDatePrev.setDate(oStartDatePrev.getDate() + 2);
+              } else if (oStartDatePrev.getDay() === 0) {
+                oNewDatePrev.setDate(oStartDatePrev.getDate() + 1);
+              }
+              oCalendar.setStartDate(oNewDatePrev);
+
+              //Kalenderwoche
+              var sWeekNumber = this._getWeekNumber(oNewDatePrev);
+              oCalWeek.setText(sWeekNumber);
+              console.log(sWeekNumber);
+            }
+          },
+          this
+        )
+      );
+
+      // Button Monat - Stundenansicht
+      // ID ist falsch und gibt es keine "attachSelect"  ===> "attachPress"
+      // Alte id : sap.ui.getCore().byId("__component0---worklist--PlanningCalendar-TimeInt--MP").attachSelect
+      // Neue id : sap.ui.getCore().byId("__component0---worklist--PlanningCalendar-1-button").attachPress
+      sap.ui.getCore().byId("__component0---worklist--PlanningCalendar-1-button").attachPress(
+        jQuery.proxy(
+          function() {
+            console.log("Month Hours pressed...Definitively");
+            if (oCalendar.getViewKey() === "H") {
+              var oStartDate = oCalendar.getStartDate();
+              var iMilliSeconds = oStartDate.getTime();
+              var oNewDate = new Date(iMilliSeconds);
+
+              oNewDate.setHours(7);
+              oCalendar.setStartDate(oNewDate);
+
+              //Kalenderwoche
+              var sWeekNumber = this._getWeekNumber(oNewDate);
+              oCalWeek.setText(sWeekNumber);
+              console.log(sWeekNumber);
+            }
+          },
+          this
+        )
+      );
+
+      // Button Jahr - Stundenansicht
+      // ID ist falsch und gibt es keine "attachSelect"  ===> "attachPress"
+      // Alte id : sap.ui.getCore().byId("__component0---worklist--PlanningCalendar-TimeInt--YP").attachSelect
+      // Neue id : sap.ui.getCore().byId("__component0---worklist--PlanningCalendar-2-button").attachPress
+      sap.ui.getCore().byId("__component0---worklist--PlanningCalendar-2-button").attachPress(
+        jQuery.proxy(
+          function() {
+            console.log("Year Hours pressed...Definitively");
+            if (oCalendar.getViewKey() === "H") {
+              var oStartDate = oCalendar.getStartDate();
+              var iMilliSeconds = oStartDate.getTime();
+              var oNewDate = new Date(iMilliSeconds);
+
+              oNewDate.setHours(7);
+              oCalendar.setStartDate(oNewDate);
+              //Kalenderwoche
+              var sWeekNumber = this._getWeekNumber(oNewDate);
+              oCalWeek.setText(sWeekNumber);
+              console.log(sWeekNumber);
+            }
+          },
+          this
+        )
+      );
+
+      // Button Tag - Stundenansicht
+      // ID ist falsch und gibt es keine "attachSelect"  ===> "attachPress"
+      // Alte id : sap.ui.getCore().byId("__component0---worklist--PlanningCalendar-TimeInt--DatesRow").attachSelect
+      // Neue id : sap.ui.getCore().byId("__component0---worklist--PlanningCalendar-3-button").attachPress
+      sap.ui.getCore().byId("__component0---worklist--PlanningCalendar-3-button").attachPress(
+        jQuery.proxy(
+          function() {
+            console.log("Date Hours pressed...Definitively");
+            if (oCalendar.getViewKey() === "H") {
+              var oStartDate = oCalendar.getStartDate();
+              var iMilliSeconds = oStartDate.getTime();
+              var oNewDate = new Date(iMilliSeconds);
+
+              oNewDate.setHours(7);
+              oCalendar.setStartDate(oNewDate);
+
+              //Kalenderwoche
+              var sWeekNumber = this._getWeekNumber(oNewDate);
+              oCalWeek.setText(sWeekNumber);
+              console.log(sWeekNumber);
+            }
+          },
+          this
+        )
+      );
+
+
+
+
+    },
+
+    /* =========================================================== */
+    /* event handlers                                              */
+    /* =========================================================== */
+
+    /**
+     * Triggered by the table's 'updateFinished' event: after new table
+     * data is available, this handler method updates the table counter.
+     * This should only happen if the update was successful, which is
+     * why this handler is attached to 'updateFinished' and not to the
+     * table's list binding's 'dataReceived' method.
+     * @param {sap.ui.base.Event} oEvent the update finished event
+     * @public
+     */
+    onUpdateFinished: function(oEvent) {
+      // update the worklist's object counter after the table update
+
+      var sTitle,
+        oTable = oEvent.getSource(),
+        iTotalItems = oEvent.getParameter("total");
+      // only update the counter if the length is final and
+      // the table is not empty
+      if (iTotalItems && oTable.getBinding("items").isLengthFinal()) {
+        sTitle = this.getResourceBundle().getText("worklistTableTitleCount", [iTotalItems]);
+      } else {
+        sTitle = this.getResourceBundle().getText("worklistTableTitle");
+      }
+      this.getModel("worklistView").setProperty("/worklistTableTitle", sTitle);
+
+    },
+
+    /**
+     * Event handler when a table item gets pressed
+     * @param {sap.ui.base.Event} oEvent the table selectionChange event
+     * @public
+     */
+    onPress: function(oEvent) {
+      // The source is the list item that got pressed
+      this._showObject(oEvent.getSource());
+    },
+
+    /**
+     * Event handler for navigating back.
+     * It there is a history entry or an previous app-to-app navigation we go one step back in the browser history
+     * If not, it will navigate to the shell home
+     * @public
+     */
+    onNavBack: function() {
+      var sPreviousHash = History.getInstance().getPreviousHash(),
+        oCrossAppNavigator = sap.ushell.Container.getService("CrossApplicationNavigation");
+
+      if (sPreviousHash !== undefined || !oCrossAppNavigator.isInitialNavigation()) {
+        history.go(-1);
+      } else {
+        oCrossAppNavigator.toExternal({
+          target: {
+            shellHash: "#Shell-home"
+          }
+        });
+      }
+    },
+
+    /**
+     * Event handler when the share in JAM button has been clicked
+     * @public
+     */
+    onShareInJamPress: function() {
+      var oViewModel = this.getModel("worklistView"),
+        oShareDialog = sap.ui.getCore().createComponent({
+          name: "sap.collaboration.components.fiori.sharing.dialog",
+          settings: {
+            object: {
+              id: location.href,
+              share: oViewModel.getProperty("/shareOnJamTitle")
+            }
+          }
+        });
+      oShareDialog.open();
+    },
+
+    onSearch: function(oEvent) {
+      var aRowFilters = [];
+      var aSubFilters = [];
+      var aAppointmentFilters = [];
+      var aAppointmentSubFilters = [];
+      var aSelectionSet = oEvent.getParameter("selectionSet");
+
+      for (var i in aSelectionSet) {
+        switch (aSelectionSet[i].getId()) {
+          //Inspektoren
+          case this.byId("InspectorSel").getId():
+            var aSelectedKeys = aSelectionSet[i].getSelectedKeys();
+            //  var aSubFilters = [];
+            if (aSelectedKeys.length !== 0) {
+              for (var i in aSelectedKeys) {
+                aSubFilters.push(new Filter("Pernr", FilterOperator.EQ, aSelectedKeys[i]));
+              }
+              aRowFilters.push(new Filter({
+                filters: aSubFilters,
+                and: false
+              }));
+            }
+            break;
+            // Datum
+          case this.byId("DateSel").getId():
+            var oDateFrom = aSelectionSet[i].getDateValue();
+            var oDateTo = aSelectionSet[i].getSecondDateValue();
+            //  var aAppointmentSubFilters = [];
+
+            if (oDateFrom !== null && oDateTo !== null) {
+              oDateTo.setHours(23);
+              oDateTo.setMinutes(59);
+              oDateTo.setSeconds(59);
+              aAppointmentSubFilters.push(new Filter("Start", FilterOperator.LE, oDateTo));
+              aAppointmentSubFilters.push(new Filter("End", FilterOperator.GE, oDateFrom));
+            }
+            break;
+
+            // Appointment Status "nur disponierte"
+          case this.byId("StatusSel").getId():
+            var sSelected = aSelectionSet[i].getSelected();
+            if (sSelected === true) {
+              aAppointmentSubFilters.push(new Filter("DispOnlyKz", FilterOperator.EQ, "X"));
+            }
+            break;
+
+            //Terminart
+          case this.byId("TartSel").getId():
+            aSubFilters = [];
+            var aSelectedKeys = aSelectionSet[i].getSelectedKeys();
+            if (aSelectedKeys.length !== 0) {
+              for (var i in aSelectedKeys) {
+                aSubFilters.push(new Filter("Terminart", FilterOperator.EQ, aSelectedKeys[i]));
+              }
+              aAppointmentSubFilters.push(new Filter({
+                filters: aSubFilters,
+                and: false
+              }));
+            }
+            break;
+        }
+      }
+
+      this.byId("PlanningCalendar").getBinding("rows").attachDataReceived(
+        jQuery.proxy(
+          function() {
+            var aRows = this.byId("PlanningCalendar").getRows();
+            for (var m in aRows) {
+              aRows[m].getBinding("appointments").filter(aAppointmentSubFilters);
+            }
+          }, this)
+      );
+      this.byId("PlanningCalendar").getBinding("rows").filter(aRowFilters);
+
+    },
+
+    onClear: function() {
+      this.byId("DateSel").setDateValue().setSecondDateValue();
+      this.byId("InspectorSel").setSelectedKeys([]);
+      this.byId("StatusSel").setSelected();
+      this.byId("TartSel").setSelectedKeys([]);
+      this.byId("filterbar").fireSearch();
+    },
+
+    //FUNCTION FOR EDIT APPOINTMENT
+    //Set State 
+    onEdit: function(oEvent) {
+      //this.getCore().byId("AdatAppComment").getProperty("editable");
+      this._setEditableStatus(!this._getEditableStatus());
+      //this._setEditableStatus(true);
+    },
+
+    onCancel: function() {
+      this._setEditableStatus(false);
+      //this.getView().getModel().refresh(true);  //Achtung, würde die kompletten Daten neu vom Odata Service laden
+    },
+
+    _setEditableStatus: function(bvalue) {
+      this.getView().getModel("worklistView").setProperty("/editable", bvalue);
+    },
+
+    _getEditableStatus: function() {
+      return this.getView().getModel("worklistView").getProperty("/editable");
+    },
+
+    _onFilterparams: function() {
+      //Get Params
+      var oTableSearchState = [];
+      var oSubFilter = [];
+
+      var strStartDate = jQuery.sap.getUriParameters().get("STARTDATE");
+      var strVkOrg = jQuery.sap.getUriParameters().get("VKORG");
+      var strSelStart = jQuery.sap.getUriParameters().get("SELSTART");
+      var strSelEnd = jQuery.sap.getUriParameters().get("SELEND");
+      var oInspector = jQuery.sap.getUriParameters().get("INSPECTOR");
+      var oTart = jQuery.sap.getUriParameters().get("TART");
+      var strDispOnly = jQuery.sap.getUriParameters().get("DISPONLY");
+
+      if (oInspector) {
+        oInspector = oInspector.split(",");
+        var aKeys = [];
+        //SubFilter
+        for (var idx = 0; idx < oInspector.length; idx++) {
+          oSubFilter.push(new Filter("Pernr", FilterOperator.EQ, oInspector[idx]));
+          aKeys[idx] = oInspector[idx];
+
+        }
+        this.getView().byId("InspectorSel").setSelectedKeys(aKeys);
+
+      }
+
+      this.getView().byId("PlanningCalendar").bindElement("/SalesorgSet('" + strVkOrg + "')");
+      this.getView().byId("InspectorSel").bindElement("/SalesorgSet('" + strVkOrg + "')");
+
+      //   this.getView().byId("PlanningCalendar").getRows().getBinding().refresh(true);
+
+      //VKORG merken
+      this.getModel("appFragment").setProperty("/sVkorg", strVkOrg);
+      console.log(this.getModel("appFragment").getProperty("/sVkorg"));
+
+      if (strStartDate && strStartDate.length > 0) {
+        var oPlanCal = this.getView().byId("PlanningCalendar");
+        if (oPlanCal) {
+          try {
+            var oDate = new Date(strStartDate);
+            //Achtung funktioniert nur für Start mit Stunden View
+            oDate.setHours(7);
+            oDate.setMinutes(0);
+            oDate.setSeconds(0);
+            oPlanCal.setStartDate(oDate);
+          } catch (err) {}
+
+        }
+      }
+
+      if (strSelStart && strSelStart.length > 0 && strSelEnd && strSelEnd.length > 0) {
+        var oSelStartDate = new Date(strSelStart);
+        var oSelEndDate = new Date(strSelEnd);
+        console.log("Achtung aufpassen jetzt!");
+        console.log(oSelStartDate);
+        console.log(oSelEndDate);
+        var oDateSel = this.getView().byId("DateSel");
+        if (oDateSel) {
+          oDateSel.setDateValue(oSelStartDate);
+          oDateSel.setSecondDateValue(oSelEndDate);
+          oTableSearchState.push(new Filter("Start", FilterOperator.LE, oSelEndDate));
+          oTableSearchState.push(new Filter("End", FilterOperator.GE, oSelStartDate));
+        }
+      }
+      // Appointment Status "nur disponierte"
+      if (strDispOnly && strDispOnly.length > 0) {
+        var oStatusSel = this.getView().byId("StatusSel");
+        if (oStatusSel) {
+          oStatusSel.setSelected(true);
+          //oStatusSel.setSelected();
+          oTableSearchState.push(new Filter("DispOnlyKz", FilterOperator.EQ, "X"));
+        }
+      }
+
+      //Terminart
+      if (oTart) {
+        oTart = oTart.split(",");
+        var aKeys = [];
+        //SubFilter
+        for (var idx = 0; idx < oTart.length; idx++) {
+          oTableSearchState.push(new Filter("Terminart", FilterOperator.EQ, oTart[idx]));
+          aKeys[idx] = oTart[idx];
+        }
+        this.getView().byId("TartSel").setSelectedKeys(aKeys);
+
+      }
+
+      this.byId("PlanningCalendar").getBinding("rows").attachDataReceived(
+        jQuery.proxy(
+          function() {
+            var aRows = this.byId("PlanningCalendar").getRows();
+            for (var m in aRows) {
+              aRows[m].getBinding("appointments").filter(oTableSearchState);
+            }
+          }, this)
+      );
+      this.byId("PlanningCalendar").getBinding("rows").filter(oSubFilter);
+
+    },
+
+    _atStart: function() {
+      var oCalendar = this.getView().byId("PlanningCalendar");
+      //console.log("nur einmalig beim Start");
+
+      var oStartDate = oCalendar.getStartDate();
+      var iMilliSeconds = oStartDate.getTime();
+      var oNewDate = new Date(iMilliSeconds);
+
+      //funktioniert nut für Stundenansicht
+      oNewDate.setHours(7);
+      oNewDate.setMinutes(0);
+      oNewDate.setSeconds(0);
+
+      oCalendar.setStartDate(oNewDate);
+
+      //Kalenderwoche bestimmen
+      var oCalWeek = this.getView().byId("CalendarWeek");
+      if (oCalWeek) {
+        var sWeekNumber = this._getWeekNumber(oNewDate);
+        oCalWeek.setText(sWeekNumber);
+      }
+
+    },
+
+    /**
+     * Event handler for refresh event. Keeps filter, sort
+     * and group settings and refreshes the list binding.
+     * @public
+     */
+    onRefresh: function() {
+      var oTable = this.byId("table");
+      oTable.getBinding("items").refresh();
+    },
+
+    handleAppointmentSelect: function(oEvent) {
+      var oAppointment = oEvent.getParameter("appointment");
+
+      if (!this._oAppointmentDetail) {
+        this._oAppointmentDetail = sap.ui.xmlfragment("is3s.pb.fragments.AppointmentDetail", this);
+        this.getView().addDependent(this._oAppointmentDetail);
+      }
+      //Details für sonstige Termine 
+      if (!this._oCreateAppointment) {
+        this._oCreateAppointment = sap.ui.xmlfragment("is3s.pb.fragments.CreateAppointment", this);
+        this.getView().addDependent(this._oCreateAppointment);
+        this._oCreateAppointment.bindElement(oAppointment.getBindingContext().getPath());
+        //dynamisch das Binding für Inspector Select setzen
+        var sVkorg = this.getModel("appFragment").getProperty("/sVkorg");
+        var oSelect = sap.ui.getCore().byId("CreateAppInspectorSel");
+        var oItemTemplate = new sap.ui.core.ListItem({
+          key: "{Pernr}",
+          text: "{Firstname} {Lastname}"
+        });
+        oSelect.bindAggregation("items", "/SalesorgSet('" + sVkorg + "')/InspectorSet", oItemTemplate);
+      }
+
+      //Details für sonstige Termine, die nicht geändert/gelöscht werden dürfen
+      if (!this._oAbsenceDetail) {
+        this._oAbsenceDetail = sap.ui.xmlfragment("is3s.pb.fragments.AbsenceDetail", this);
+        this.getView().addDependent(this._oAbsenceDetail);
+      }
+
+      /*  // Test Escape Taste (und alle anderen Tasten) deaktivieren
+      this._oAppointmentDetail._oControl.attachBrowserEvent("keydown", function(oEvent1) {
+        oEvent1.stopPropagation();
+        oEvent1.preventDefault();
+      });
+      */
+
+      if (oAppointment.getBindingContext().getProperty("Terminart") === 1) {
+        this._oAppointmentDetail.bindElement(oAppointment.getBindingContext().getPath());
+        this._oAppointmentDetail.openBy(oAppointment);
+        sap.ui.getCore().byId('AdatAppComment').bindValue('AppComment');
+
+        //FASAN ODATA ZU TABLE VERBINDEN:
+        var sPernr = oAppointment.getParent().getProperty('key');
+        var sAufnr = sap.ui.getCore().byId("Aufnr").getProperty('text');
+        var sPath = "/PlanboardSet(Pernr='" + sPernr + "',Terminnr='',Aufnr='" + sAufnr + "')/InspectionSet";
+
+        var oModel = this.getOwnerComponent().getModel();
+        var oJSONModel = new sap.ui.model.json.JSONModel();
+        oModel.read(sPath,{
+            success: function(response){
+              debugger;
+              if(response.results.length === 1){
+              oJSONModel.setData(response.results);
+              //this.getView().setModel(oJSONModel, "InspectionDataModel");
+              sap.ui.getCore().byId("EqunrTxt").setText(response.results[0].Equnr);
+              sap.ui.getCore().byId("QmnumTxt").setText(response.results[0].Qmnum);
+              sap.ui.getCore().byId("MaktxTxt").setText(response.results[0].Maktx);
+              sap.ui.getCore().byId("CustomerObjectIdTxt").setText(response.results[0].CustomerObjectId);
+              sap.ui.getCore().byId("KunwfNameTxt").setText(response.results[0].KunwfName);
+              sap.ui.getCore().byId("Name1Txt").setText(response.results[0].Name1);
+              sap.ui.getCore().byId("StreetHouseNum1Txt").setText(response.results[0].Street + " " + response.results[0].HouseNum1);
+              sap.ui.getCore().byId("PostCodeCityTxt").setText(response.results[0].PostCode1 + " " + response.results[0].City1);
+              sap.ui.getCore().byId("EquiTextTxt").setText(response.results[0].EquiText);
+
+              }
+            },
+            error: function(error){
+            }
+            })
+
+
+
+
+
+//this._oAppointmentDetail.bindElement(sPath);
+//sap.ui.getCore().byId("SimpleFormDisplay480_12120").bindElement({path: sPath});
+//sap.ui.getCore().byId("SimpleFormDisplay480_12120").bindElement("/InspectionSet");
+//sap.ui.getCore().byId("SimpleFormDisplay480_12120--Form").bindElement({path: sPath});
+//sap.ui.getCore().byId("SimpleFormDisplay480_12120").bindElement("InspectionSet('1000038778')");
+
+      } else if (oAppointment.getBindingContext().getProperty("Terminart") === 21 || oAppointment.getBindingContext().getProperty(
+          "Terminart") === 22) {
+        this._oAbsenceDetail.bindElement(oAppointment.getBindingContext().getPath());
+        this._oAbsenceDetail.openBy(oAppointment);
+      } else {
+        this.getModel("appFragment").setProperty("/sAppModus", "show");
+        this.getModel("appFragment").setProperty("/sPernrChange", "false");
+        this._oCreateAppointment.bindElement(oAppointment.getBindingContext().getPath());
+        console.log(this._oCreateAppointment.getBindingContext().getPath());
+        this._oCreateAppointment.open();
+      }
+    },
+
+    handleViewSelect: function() {
+      var oCalendar = this.getView().byId("PlanningCalendar");
+      var oCalWeek = this.getView().byId("CalendarWeek");
+      var oCalWeekLabel = this.getView().byId("CalWeekLabel");
+      var oStartDate = oCalendar.getStartDate();
+      console.log(oStartDate.getDay());
+      var iMilliSeconds = oStartDate.getTime();
+      var oNewDate = new Date(iMilliSeconds);
+      if (oCalendar.getViewKey() === "D" || oCalendar.getViewKey() === "W") {
+        if (oStartDate.getDay() < 6 && oStartDate.getDay() !== 0) {
+          oNewDate.setDate(oStartDate.getDate() - oStartDate.getDay() + 1);
+        } else if (oStartDate.getDay() === 6) {
+          oNewDate.setDate(oStartDate.getDate() + 2);
+        } else if (oStartDate.getDay() === 0) {
+          oNewDate.setDate(oStartDate.getDate() + 1);
+        }
+
+        //Buttons in der Tagesansicht
+        // Button previous - Tageansicht
+        // ID ist falsch und gibt es keine "attachPressPrevious"  ===> "attachPress"
+        // Alte id : sap.ui.getCore().byId("__component0---worklist--PlanningCalendar-DateInt--Head").attachPressPrevious
+        // Neue id : sap.ui.getCore().byId("__component0---worklist--PlanningCalendar-Header-NavToolbar-PrevBtn").attachPress
+        // Previous und Next functions geht zum onAfterRendering method.
+        //sap.ui.getCore().byId("__component0---worklist--PlanningCalendar-Header-NavToolbar-PrevBtnX").attachPress(
+        //  jQuery.proxy(
+        //    function() {
+        //      console.log("Previous Days pressed!");
+        //      var oStartDatePrev = oCalendar.getStartDate();
+        //      var iMilliSecondsPrev = oStartDatePrev.getTime();
+        //      var oNewDatePrev = new Date(iMilliSecondsPrev);
+        //      if (oStartDatePrev.getDay() < 6 && oStartDatePrev.getDay() !== 0) {
+        //        oNewDatePrev.setDate(oStartDatePrev.getDate() - oStartDatePrev.getDay() + 1);
+        //      } else if (oStartDatePrev.getDay() === 6) {
+        //        oNewDatePrev.setDate(oStartDatePrev.getDate() + 2);
+        //      } else if (oStartDatePrev.getDay() === 0) {
+        //        oNewDatePrev.setDate(oStartDatePrev.getDate() + 1);
+        //      }
+        //      oCalendar.setStartDate(oNewDatePrev);
+
+              //Kalenderwoche
+        //      var sWeekNumber = this._getWeekNumber(oNewDatePrev);
+        //      oCalWeek.setText(sWeekNumber);
+        //      console.log(sWeekNumber);
+        //    },
+        //    this
+        //  )
+        // );
+
+        // Button next - Tageansicht
+        // ID ist falsch und gibt es keine "attachPressNext"  ===> "attachPress"
+        // Alte id : sap.ui.getCore().byId("__component0---worklist--PlanningCalendar-DateInt--Head").attachPressNext
+        // Neue id : sap.ui.getCore().byId("__component0---worklist--PlanningCalendar-Header-NavToolbar-NextBtn").attachPress(
+        /*sap.ui.getCore().byId("__component0---worklist--PlanningCalendar-Header-NavToolbar-NextBtnX").attachPress(
+          jQuery.proxy(
+            function() {
+              console.log("Next Days pressed!");
+              var oStartDatePrev = oCalendar.getStartDate();
+              var iMilliSecondsPrev = oStartDatePrev.getTime();
+              var oNewDatePrev = new Date(iMilliSecondsPrev);
+              if (oStartDatePrev.getDay() < 6 && oStartDatePrev.getDay() !== 0) {
+                oNewDatePrev.setDate(oStartDatePrev.getDate() - oStartDatePrev.getDay() + 1);
+              } else if (oStartDatePrev.getDay() === 6) {
+                oNewDatePrev.setDate(oStartDatePrev.getDate() + 2);
+              } else if (oStartDatePrev.getDay() === 0) {
+                oNewDatePrev.setDate(oStartDatePrev.getDate() + 1);
+              }
+              oCalendar.setStartDate(oNewDatePrev);
+
+              //Kalenderwoche
+              var sWeekNumber = this._getWeekNumber(oNewDatePrev);
+              oCalWeek.setText(sWeekNumber);
+              console.log(sWeekNumber);
+            },
+            this
+          )
+        );*/
+
+        // Button Monat - Tagesansicht
+        // ID ist falsch und gibt es keine "attachSelect"  ===> "attachPress"
+        // Alte id : sap.ui.getCore().byId("__component0---worklist--PlanningCalendar-DateInt--MP").attachSelect
+        // Neue id : sap.ui.getCore().byId("__component0---worklist--PlanningCalendar-1-button").attachPress(
+        sap.ui.getCore().byId("__component0---worklist--PlanningCalendar-1-button").attachPress(
+          jQuery.proxy(
+            function() {
+              console.log("Month Days pressed...Definitively");
+              var oStartDatePrev = oCalendar.getStartDate();
+              var iMilliSecondsPrev = oStartDatePrev.getTime();
+              var oNewDatePrev = new Date(iMilliSecondsPrev);
+              if (oStartDatePrev.getDay() < 6 && oStartDatePrev.getDay() !== 0) {
+                oNewDatePrev.setDate(oStartDatePrev.getDate() - oStartDatePrev.getDay() + 1);
+              } else if (oStartDatePrev.getDay() === 6) {
+                oNewDatePrev.setDate(oStartDatePrev.getDate() + 2);
+              } else if (oStartDatePrev.getDay() === 0) {
+                oNewDatePrev.setDate(oStartDatePrev.getDate() + 1);
+              }
+              oCalendar.setStartDate(oNewDatePrev);
+
+              //Kalenderwoche
+              var sWeekNumber = this._getWeekNumber(oNewDatePrev);
+              oCalWeek.setText(sWeekNumber);
+              console.log(sWeekNumber);
+            },
+            this
+          )
+        );
+
+        // Button Jahr - Tagesnansicht
+        // ID ist falsch und gibt es keine "attachSelect"  ===> "attachPress"
+        // Alte id : sap.ui.getCore().byId("__component0---worklist--PlanningCalendar-DateInt--YP").attachSelect(
+        // Neue id : sap.ui.getCore().byId("__component0---worklist--PlanningCalendar-2-button").attachPress(
+        sap.ui.getCore().byId("__component0---worklist--PlanningCalendar-2-button").attachPress(
+          jQuery.proxy(
+            function() {
+              console.log("Year Days pressed...Definitively");
+              var oStartDatePrev = oCalendar.getStartDate();
+              var iMilliSecondsPrev = oStartDatePrev.getTime();
+              var oNewDatePrev = new Date(iMilliSecondsPrev);
+              if (oStartDatePrev.getDay() < 6 && oStartDatePrev.getDay() !== 0) {
+                oNewDatePrev.setDate(oStartDatePrev.getDate() - oStartDatePrev.getDay() + 1);
+              } else if (oStartDatePrev.getDay() === 6) {
+                oNewDatePrev.setDate(oStartDatePrev.getDate() + 2);
+              } else if (oStartDatePrev.getDay() === 0) {
+                oNewDatePrev.setDate(oStartDatePrev.getDate() + 1);
+              }
+              oCalendar.setStartDate(oNewDatePrev);
+
+              //Kalenderwoche
+              var sWeekNumber = this._getWeekNumber(oNewDatePrev);
+              oCalWeek.setText(sWeekNumber);
+              console.log(sWeekNumber);
+            },
+            this
+          )
+        );
+
+
+        // Button Day - Tagesansicht - gibt es nicht!
+
+        var oStartDate1 = oCalendar.getStartDate();
+        if (oCalWeek) {
+          var sWeekNumber = this._getWeekNumber(oStartDate1);
+          oCalWeek.setText(sWeekNumber);
+        }
+
+        //Textfeld und Label für Kalenderwoche in der Tagesansicht sichtbar machen
+        if (!oCalWeek.getVisible()) {
+          oCalWeek.setVisible(true);
+        }
+        if (!oCalWeekLabel.getVisible()) {
+          oCalWeekLabel.setVisible(true);
+        }
+
+      } else if (oCalendar.getViewKey() === "H") {
+
+        oNewDate.setHours(7);
+        // die Buttons in der Stundenasicht werden schon bei onAfterRendering verarztet
+
+        var oStartDate2 = oCalendar.getStartDate();
+        if (oCalWeek) {
+          var sWeekNumber2 = this._getWeekNumber(oStartDate2);
+          oCalWeek.setText(sWeekNumber2);
+        }
+        //Textfeld und Label für Kalenderwoche in der Stundenansicht sichtbar machen
+        if (!oCalWeek.getVisible()) {
+          oCalWeek.setVisible(true);
+        }
+        if (!oCalWeekLabel.getVisible()) {
+          oCalWeekLabel.setVisible(true);
+        }
+
+
+      } else if (oCalendar.getViewKey() === "M") {
+        // keine eigene Behandlung in der Monatsansicht
+
+        var oStartDate3 = oCalendar.getStartDate();
+        if (oCalWeek) {
+          var sWeekNumber3 = this._getWeekNumber(oStartDate3);
+          oCalWeek.setText(sWeekNumber3);
+        }
+        //Textfeld und Label für Kalenderwoche in der Monatsansicht unsichtbar machen
+        if (oCalWeek.getVisible()) {
+          oCalWeek.setVisible(false);
+        }
+        if (oCalWeekLabel.getVisible()) {
+          oCalWeekLabel.setVisible(false);
+        }
+      }
+      oCalendar.setStartDate(oNewDate);
+
+      //Kalenderwoche
+      var sWeekNumberr = this._getWeekNumber(oNewDate);
+      oCalWeek.setText(sWeekNumberr);
+      console.log(sWeekNumberr);
+    },
+
+    handleStartDateChange: function(oEvent) {
+      console.log("handleStartDateChange");
+      console.log("do nothing");
+    },
+
+    // Handler für click im fragment (Details PopUp)
+    handlePress: function(oEvent) {
+      //console.log(oEvent.getParameters());
+
+      // console.log(oWs);
+      // this.oWs.send("AUFNR:0815");
+
+      // Transaktion im WEBGUI öffnen
+      //var sUrl = 'http://vh01s0er3.netz.tuev-nord.de:8000/sap/bc/gui/sap/its/webgui~transaction=*iw33 ANR=000200001639';
+      // var sUrl = 'http://vh01s0er3.netz.tuev-nord.de:8000/sap/bc/gui/sap/its/webgui?sap-client=001~transaction=*iw33';
+      // window.open(sUrl);
+
+      // über oData Service ins SAP
+      // this.getModel().callFunction("/CallTransaction",{
+      //  urlParameters : { "TCode" : "IW33" }
+      // });
+
+    },
+
+    // Handler für klick im kalender (Appointment hinzufügen)
+    handleIntervalSelect: function(oEvent) {
+
+      console.log("In Kalender geklickt");
+      var oStartDate = oEvent.getParameter("startDate");
+      var oEndDate = oEvent.getParameter("endDate");
+      var oRow = oEvent.getParameter("row");
+      //console.log(oRow);
+      //var oSubInterval = oEvent.getParameter("subInterval");
+      //console.log(oSubInterval);
+      //var iIndex = oEvent.oSource.indexOfRow(oRow);
+      //var aTitle = oRow.mBindingInfo.title.parts;
+      //var sTitle = oRow.getTitle();
+      //console.log(sTitle);
+      var sKey = oRow.getKey();
+      console.log(sKey);
+
+      this.getModel("appFragment").setProperty("/sAppModus", "create");
+      this.getModel("appFragment").setProperty("/sPernrChange", "false");
+
+      if (!this._oCreateAppointment) {
+        this._oCreateAppointment = sap.ui.xmlfragment("is3s.pb.fragments.CreateAppointment", this);
+        this.getView().addDependent(this._oCreateAppointment);
+        //dynamisch das Binding für Inspector Select setzen
+        var sVkorg = this.getModel("appFragment").getProperty("/sVkorg");
+        var oSelect = sap.ui.getCore().byId("CreateAppInspectorSel");
+        var oItemTemplate = new sap.ui.core.ListItem({
+          key: "{Pernr}",
+          text: "{Firstname} {Lastname}"
+        });
+        oSelect.bindAggregation("items", "/SalesorgSet('" + sVkorg + "')/InspectorSet", oItemTemplate);
+
+      }
+
+      // Daten für Terminanlage vorbelegen
+      // var oInsp = sap.ui.getCore().byId("CreateAppInspectorSel");
+      // oInsp.setSelectedKey(sKey);
+
+      //Start
+      //var oStart = sap.ui.getCore().byId("CreateAppStart");
+      //oStart.setDateValue(oStartDate);
+      //oStart.setValueState(sap.ui.core.ValueState.None);
+
+      //Ende (= Start + 1 Stunde)
+      //var oEnd = sap.ui.getCore().byId("CreateAppEnd");
+      var iMilliSeconds = oStartDate.getTime();
+      var oNewDate = new Date(iMilliSeconds);
+      var sHours = oNewDate.getHours() + 1;
+      oNewDate.setHours(sHours);
+      //oEnd.setDateValue(oNewDate);
+      //oEnd.setValueState(sap.ui.core.ValueState.None);
+
+      //Bemerkung, Ort und Terminart initialisieren
+      //this._initCreateApp();
+
+      var oContext = this.getModel().createEntry("/PlanboardSet", {
+        properties: {
+          Pernr: sKey,
+          Start: oStartDate,
+          End: oNewDate,
+          TerminOrt: "",
+          TerminText: ""
+        }
+      });
+
+      this._oCreateAppointment.bindElement(oContext.getPath());
+
+      this._oCreateAppointment.open();
+    },
+
+    handleTerminArtValueChange: function(oEvent) {
+      var oItem = oEvent.getParameter("selectedItem");
+      var sPath = oEvent.getSource().getBindingContext().getPath() + "/" + oEvent.getSource().getBinding("selectedKey").getPath();
+      this.getModel().setProperty(sPath, parseInt(oItem.getKey(), 10));
+    },
+
+    handleInspectorValueChange: function(oEvent) {
+      var oItem = oEvent.getParameter("selectedItem");
+      var sPath = oEvent.getSource().getBindingContext().getPath() + "/" + oEvent.getSource().getBinding("selectedKey").getPath();
+      this.getModel().setProperty(sPath, oItem.getKey());
+      this.getModel("appFragment").setProperty("/sPernrChange", "true");
+    },
+
+    // Handler für Klick auf Toolbar Button
+    handleAddButtonPress: function(oEvent) {
+      // console.log("Button gedrückt");
+      // console.log(oEvent.getParameters());
+      // console.log(oEvent.getSource());
+      if (!this._oCreateAppointment) {
+        this._oCreateAppointment = sap.ui.xmlfragment("is3s.pb.fragments.CreateAppointment", this);
+        this.getView().addDependent(this._oCreateAppointment);
+        this._oCreateAppointment.bindElement(this.getView().byId("PlanningCalendar").getBindingContext().getPath());
+
+        // FASAN 18.12.2023
+        // Der Dropdown "Sachverständiger" im Popup, das durch den Button "Termin Anlagen" geöffnet wird, war leer.
+        // Um zu verhindern, dass es leer bleibt, wurde es hinzugefügt.
+        var sVkorg = this.getModel("appFragment").getProperty("/sVkorg");
+        var oSelect = sap.ui.getCore().byId("CreateAppInspectorSel");
+        var oItemTemplate = new sap.ui.core.ListItem({
+          key: "{Pernr}",
+          text: "{Firstname} {Lastname}"
+        });
+        oSelect.bindAggregation("items", "/SalesorgSet('" + sVkorg + "')/InspectorSet", oItemTemplate);
+
+
+      }
+
+      this.getModel("appFragment").setProperty("/sAppModus", "create");
+      this.getModel("appFragment").setProperty("/sPernrChange", "false");
+
+      // Daten für Terminanlage vorbelegen
+      // var oInsp = sap.ui.getCore().byId("CreateAppInspectorSel");
+      // oInsp.setSelectedKey();
+
+      //Start
+      // var oStart = sap.ui.getCore().byId("CreateAppStart");
+      // oStart.setDateValue();
+      // oStart.setValueState(sap.ui.core.ValueState.None);
+
+      //Ende (= Start + 1 Stunde)
+      // var oEnd = sap.ui.getCore().byId("CreateAppEnd");
+      // oEnd.setDateValue();
+      // oEnd.setValueState(sap.ui.core.ValueState.None);
+
+      //Bemerkung, Ort und Terminart initialisieren
+      // this._initCreateApp();
+
+      var oContext = this.getModel().createEntry("/PlanboardSet", {
+        properties: {
+          Pernr: "",
+          Start: "",
+          End: "",
+          TerminOrt: "",
+          TerminText: ""
+        }
+      });
+      this._oCreateAppointment.bindElement(oContext.getPath());
+      console.log(this._oCreateAppointment.getBindingContext().getPath());
+      this._oCreateAppointment.open();
+    },
+
+    handleFragDetailButtonClosePressed: function(oEvent) {
+      this._setEditableStatus(false);
+      //this.onCancel();
+      this._oAppointmentDetail.close();
+      this._oAbsenceDetail.close();
+      //oEvent.getSource().getParent().close();
+    },
+
+    //Terminänderung PopUp aufrufen - für Appointments
+    handleFragDetailButtonEditPressed: function(oEvent) {
+      console.log("Appointment ändern gedrückt");
+      this._myCurrentContext = oEvent.getSource().getBindingContext();
+      console.log(this._myCurrentContext);
+      console.log(this._myCurrentContext.getPath());
+
+      // hier muss jetzt geprüft werden ob das Appointment geändert werden darf,
+      //1) Termin darf nicht in der Vergangenheit liegen  (Ende muss > "jetzt" sein) 
+      var oEnd = this._myCurrentContext.getProperty("End");
+      var oNow = new Date(); //aktueller Timestamp als Vergleich
+      if (oEnd <= oNow) {
+        sap.m.MessageToast.show(this.getView().getModel("i18n").getResourceBundle().getText("checkEditDatePastMsg"));
+        return;
+      }
+
+      //2) Prüfung im Backend ob manuelle Dispo (ja) oder EasyTrack (nein) + Appointment muss Status DISP oder INIT haben
+
+      this.getView().getModel().callFunction("/CheckEdit", {
+        method: "POST",
+        urlParameters: {
+          "Aufnr": this._myCurrentContext.getProperty("Aufnr")
+        },
+        success: (function(oData, response) {
+          console.log(oData);
+          console.log(response);
+          var sAllowed = oData.CheckEdit.Allowed;
+          var sMessageSap = oData.CheckEdit.Message;
+          if (sAllowed) {
+            //das Appointment Fragment schliessen
+            this._oAppointmentDetail.close();
+
+            //die Dauer ermitteln
+            var oStart = this._myCurrentContext.getProperty("Start");
+            var sDuration = oEnd - oStart;
+            console.log(sDuration);
+            this.getModel("appFragment").setProperty("/sDuration", sDuration);
+
+            //Millisekunden in hh:mm:ss umwandeln
+            //var sDura = this._msToTime(sDuration);
+            //console.log(sDura);
+
+            //Details für sonstige Termine 
+            if (!this._oChangeAppointment) {
+              this._oChangeAppointment = sap.ui.xmlfragment("is3s.pb.fragments.ChangeAppointment", this);
+              this.getView().addDependent(this._oChangeAppointment);
+              //dynamisch das Binding für Inspector Select setzen
+              var sVkorg = this.getModel("appFragment").getProperty("/sVkorg");
+              var oSelect = sap.ui.getCore().byId("ChangeAppInspectorSel");
+              var oItemTemplate = new sap.ui.core.ListItem({
+                key: "{Pernr}",
+                text: "{Firstname} {Lastname}"
+              });
+              oSelect.bindAggregation("items", "/SalesorgSet('" + sVkorg + "')/InspectorSet", oItemTemplate);
+
+            }
+
+            this.getModel("appFragment").setProperty("/sAppModus", "edit");
+            this.getModel("appFragment").setProperty("/sPernrChange", "false");
+
+            // wir brauchen hier das angeklickte Appointment (PlanboardSet)
+            this._oChangeAppointment.bindElement(this._myCurrentContext.getPath());
+            console.log(this._myCurrentContext);
+            console.log(this._oChangeAppointment.getBindingContext().getPath());
+            this._oChangeAppointment.open();
+          } else {
+            var sMessageFiori;
+            sMessageFiori = this.getView().getModel("i18n").getResourceBundle().getText("checkEditErrorMsg");
+            var sMessage = sMessageFiori + "!" + "\n\r " + sMessageSap;
+            sap.m.MessageToast.show(sMessage, {
+              duration: 8000,
+              width: "20em"
+            });
+          }
+        }).bind(this), // callback function for success
+        error: function(oError) {
+            return;
+          }.bind(this) // callback function for error
+      });
+
+    },
+
+    //Terminänderung abbrechen
+    handleCancelChangePressed: function() {
+      console.log("Terminänderung abgebrochen");
+      //Bemerkung, Ort und Terminart initialisieren
+      //this._initCreateApp();
+      this.getModel("appFragment").setProperty("/sAppModus", "show");
+      this.getModel("appFragment").setProperty("/sPernrChange", "false");
+      this.getModel("appFragment").setProperty("/sDuration", "");
+      this.getModel().resetChanges();
+      this._oChangeAppointment.close();
+    },
+
+    //Terminänderung speichern 
+    handleSaveChangePressed: function() {
+      console.log("Appointment speichern gedrückt");
+
+      //Eingabeprüfungen
+      var oEnd = sap.ui.getCore().byId("ChangeAppEnd");
+      var oStart = sap.ui.getCore().byId("ChangeAppStart");
+      var oNow = new Date(); //aktueller Timestamp als Vergleich
+
+      //Inspektor ausgewählt?
+      if (!sap.ui.getCore().byId("ChangeAppInspectorSel").getSelectedKey()) {
+        console.log("Kein Prüfer ausgewählt");
+        sap.m.MessageToast.show(this.getView().getModel("i18n").getResourceBundle().getText("changeAppInspEmptyMsg"));
+        return;
+      }
+
+      // Start und Ende jeweils korrektes Format?
+      if (oEnd.getValueState() === sap.ui.core.ValueState.Error || oStart.getValueState() === sap.ui.core.ValueState.Error) {
+        //fehlerhaftes Datum
+        console.log("Fehlerhaftes Datum");
+        return;
+      }
+
+      // liegt Startdatum vor Ende? 
+      var oStartDate = oStart.getDateValue();
+      var oEndDate = oEnd.getDateValue();
+
+      if (!oStartDate || !oEndDate) {
+        console.log("Zeitraum muss gefüllt sein");
+        sap.m.MessageToast.show(this.getView().getModel("i18n").getResourceBundle().getText("changeAppDateEmptyMsg"));
+        return;
+      }
+
+      if (oEndDate <= oStartDate) {
+        console.log("Das Startdatum muss vor dem Enddatum liegen");
+        sap.m.MessageToast.show(this.getView().getModel("i18n").getResourceBundle().getText("changeAppDateWrongMsg"));
+        return;
+      }
+
+      // Ende darf nicht in der Vergangenheit liegen
+      if (oEndDate <= oNow) {
+        console.log("Das Enddatum darf nicht in der Vergangenheit liegen");
+        sap.m.MessageToast.show(this.getView().getModel("i18n").getResourceBundle().getText("changeAppDatePastMsg"));
+        return;
+      }
+
+      //hier jetzt noch prüfen ob die neue Dauer der ursprünglichen Dauer entspricht
+      var sDuration = this.getModel("appFragment").getProperty("/sDuration");
+      var sNewDur = oEndDate - oStartDate;
+
+      if (sDuration !== sNewDur) {
+        //PopUp trotzdem weitermachen?
+        console.log("Dauer stimmt nicht überein");
+        sap.m.MessageBox.confirm(
+          this.getView().getModel("i18n").getResourceBundle().getText("changeAppDurDiffMsg"), {
+            onClose: (function(oAction) {
+              console.log(oAction);
+              if (oAction === "OK") {
+                //Änderungen im Backend speichern
+                this._submitAppChanges();
+              } else {
+                return;
+              }
+            }).bind(this)
+          }
+        );
+
+      } else {
+        //Alle Prüfungen bestanden - Änderungen im Backend speichern
+        this._submitAppChanges();
+      }
+
+    },
+
+    //Termin speichern
+    handleSaveCreatePressed: function() {
+      console.log("Termin speichern gedrückt");
+
+      //Eingabeprüfungen
+      var oEnd = sap.ui.getCore().byId("CreateAppEnd");
+      var oStart = sap.ui.getCore().byId("CreateAppStart");
+
+      //Inspektor ausgewählt?
+      if (!sap.ui.getCore().byId("CreateAppInspectorSel").getSelectedKey()) {
+        console.log("Kein Prüfer ausgewählt");
+        sap.m.MessageToast.show(this.getView().getModel("i18n").getResourceBundle().getText("createAppInspEmptyMsg"));
+        return;
+      }
+
+      // Start und Ende jeweils korrektes Format?
+      if (oEnd.getValueState() === sap.ui.core.ValueState.Error || oStart.getValueState() === sap.ui.core.ValueState.Error) {
+        //fehlerhaftes Datum
+        console.log("Fehlerhaftes Datum");
+        return;
+      }
+
+      // liegt Startdatum vor Ende?
+      var oStartDate = oStart.getDateValue();
+      var oEndDate = oEnd.getDateValue();
+
+      if (!oStartDate || !oEndDate) {
+        console.log("Zeitraum muss gefüllt sein");
+        sap.m.MessageToast.show(this.getView().getModel("i18n").getResourceBundle().getText("createAppDateEmptyMsg"));
+        return;
+      }
+
+      if (oEndDate <= oStartDate) {
+        console.log("Das Startdatum muss vor dem Enddatum liegen");
+        sap.m.MessageToast.show(this.getView().getModel("i18n").getResourceBundle().getText("createAppDateWrongMsg"));
+        return;
+      }
+
+      //Terminart gefüllt?
+      var oTart = sap.ui.getCore().byId("CreateAppTartSel");
+      var sTart = oTart.getSelectedKey();
+      if (!sTart) {
+        console.log("Terminart muss gefüllt sein");
+        sap.m.MessageToast.show(this.getView().getModel("i18n").getResourceBundle().getText("createAppTartEmptyMsg"));
+        return;
+      }
+      // Terminart muss nicht mehr umgeschlüsselt werden. Wir haben die Zahl als Key
+      //Terminart muss umgeschlüsselt werden, von Text zu Zahl ( z.B. RES -> 10 )
+      //var sTerminart = this._convertTartAlphaNum(sTart);
+      //if (sTerminart === 0) {
+      //  console.log("unbekannte Terminart");
+      //  return;
+      //}
+
+      /**
+
+                    // hier dann create entity aufrufen
+                    var oEntity = {
+                      Pernr: sap.ui.getCore().byId("CreateAppInspectorSel").getSelectedKey(),
+                      Terminart: parseInt(sTart, 10), //Achtung wir brauchen die Zahl als Integer und nicht als String!
+                      Start: oStartDate,
+                      End: oEndDate,
+                      TerminText: sap.ui.getCore().byId("CreateAppComment").getValue(),
+                      TerminOrt: sap.ui.getCore().byId("CreateAppLocation").getValue()
+                    };
+
+                    // schreibender Zugriff ohne CSRF Token - dafür mit festem Header
+                    //eigentlich hier überflüssig, X-Requested-With wird schon im manifest.json gesetzt
+                    this.getModel().setHeaders({
+                      "X-Requested-With": "XMLHttpRequest"
+                        //"X-CSRF-Token" : this._csrfToken
+                    });
+
+                    this.getModel().create("/PlanboardSet", oEntity, {
+                      success: jQuery.proxy(
+                        function(oData) {
+                          console.log("Datensatz angelegt:");
+                          console.log(oData);
+                          //PopUp schliessen + Erfolgsmeldung
+                          this._initCreateApp();
+                          this._oCreateAppointment.close();
+                          sap.m.MessageToast.show(this.getView().getModel("i18n").getResourceBundle().getText("createAppSuccessMsg"));
+                        }, this
+                      ),
+                      error: jQuery.proxy(
+                        function(oError) {
+                          console.log(oError);
+                          var sMessageSap = jQuery.parseJSON(oError.responseText).error.message.value;
+                          var sMessage = this.getView().getModel("i18n").getResourceBundle().getText("createAppErrorMsg") + "!" + "\n\r " +
+                            sMessageSap;
+                          sap.m.MessageToast.show(sMessage, {
+                            duration: 8000,
+                            width: "20em"
+                          });
+
+                        }, this
+                      )
+                    });
+
+                    */
+
+      this.getModel().submitChanges({
+        success: function(oData) {
+          this._evaluateSubmitChangesREsult(oData, {
+            success: function() {
+              console.log("Datensatz angelegt/geändert:");
+              console.log(oData);
+              //PopUp schliessen + Erfolgsmeldung
+              //            this._initCreateApp();
+              this._oCreateAppointment.close();
+              //Text je nach Modus holen
+              var sMessage;
+              if (this.getModel("appFragment").getProperty("/sAppModus") === "edit") {
+                //Appointments für den Inspektor nur neu lasen, wenn es einen Wechsel bei der Pernr gab
+                if (this.getModel("appFragment").getProperty("/sPernrChange") === "true") {
+                  this._reloadRows(sap.ui.getCore().byId("CreateAppInspectorSel").getSelectedKey());
+                }
+                sMessage = this.getView().getModel("i18n").getResourceBundle().getText("changeAppSuccessMsg");
+              } else if (this.getModel("appFragment").getProperty("/sAppModus") === "create") {
+                sMessage = this.getView().getModel("i18n").getResourceBundle().getText("createAppSuccessMsg");
+              }
+              sap.m.MessageToast.show(sMessage);
+              //sap.m.MessageToast.show(this.getView().getModel("i18n").getResourceBundle().getText("createAppSuccessMsg"));
+            }.bind(this),
+
+            error: function(oError, o) {
+              console.log(oError);
+              console.log(oError.message);
+              //var sMessageSap = jQuery.parseJSON(oError.responseText).error.message.value;
+              var sMessageSap = oError.message;
+              var sMessageFiori;
+              if (this.getModel("appFragment").getProperty("/sAppModus") === "edit") {
+                sMessageFiori = this.getView().getModel("i18n").getResourceBundle().getText("changeAppErrorMsg");
+              } else if (this.getModel("appFragment").getProperty("/sAppModus") === "create") {
+                sMessageFiori = this.getView().getModel("i18n").getResourceBundle().getText("createAppErrorMsg");
+              }
+              var sMessage = sMessageFiori + "!" + "\n\r " + sMessageSap;
+              //var sMessage = this.getView().getModel("i18n").getResourceBundle().getText("createAppErrorMsg") + "!" + "\n\r " + sMessageSap;
+              sap.m.MessageToast.show(sMessage, {
+                duration: 8000,
+                width: "20em"
+              });
+
+            }.bind(this)
+          });
+
+        }.bind(this)
+
+      });
+    },
+
+    //Änderung am Appointment speichern - zur Zeit nur Bemerkung änderbar
+    handleFragDetailButtonSavePressed: function(oEvent) {
+      var oEntity = {
+        //Aufnr: sap.ui.getCore().byId("Aufnr").getText(), 
+        AppComment: sap.ui.getCore().byId("AdatAppComment").getValue(),
+        InspScope: sap.ui.getCore().byId("AdatInspScope").getValue()
+      };
+      var sAufnr = sap.ui.getCore().byId("Aufnr_Key").getValue();
+      var sPath = sap.ui.getCore().byId("AppointmentDetail").getBindingContext().getPath();
+
+      // schreibender Zugriff ohne CSRF Token - dafür mit festem Header
+      //eigentlich hier überflüssig, X-Requested-With wird schon im manifest.json gesetzt
+      this.getModel().setHeaders({
+        "X-Requested-With": "XMLHttpRequest"
+          //"X-CSRF-Token" : this._csrfToken
+      });
+
+      this.getModel().update(sPath, oEntity, {
+        //method: "PUT",
+        success: jQuery.proxy(
+          function(oData) {
+            console.log("Datensatz angelegt:");
+            this._setEditableStatus(false);
+            //PopUp schliessen + Erfolgsmeldung
+            this._oAppointmentDetail.close();
+            this._reloadAppointments(sAufnr);
+            sap.m.MessageToast.show(this.getView().getModel("i18n").getResourceBundle().getText("UpdateAppSuccessMsg"));
+          }, this
+        ),
+        error: jQuery.proxy(
+          function(oError) {
+            console.log(oError);
+            var sMessageSap = jQuery.parseJSON(oError.responseText).error.message.value;
+            var sMessage = this.getView().getModel("i18n").getResourceBundle().getText("UpdateAppErrorMsg") + "!" + "\n\r " +
+              sMessageSap;
+            sap.m.MessageToast.show(sMessage, {
+              duration: 8000,
+              width: "20em"
+            });
+
+          }, this
+        )
+      });
+
+    },
+
+    //Terminanlage abbrechen
+    handleCancelCreatePressed: function() {
+      console.log("Terminanlage abgebrochen");
+      //Bemerkung, Ort und Terminart initialisieren
+      //this._initCreateApp();
+      this.getModel("appFragment").setProperty("/sAppModus", "show");
+      this.getModel("appFragment").setProperty("/sPernrChange", "false");
+      this.getModel("appFragment").setProperty("/sDuration", "");
+      this.getModel().resetChanges();
+      this._oCreateAppointment.close();
+    },
+
+    //Event Dialog für Terminanlage/-änderung wird geschlossen - falls jemand nicht über den "Cancel" Button schliesst
+    handleCreateAppAfterClose: function(oEvent) {
+      this.getModel().resetChanges();
+    },
+
+    handleEditCreatePressed: function() {
+      this.getModel("appFragment").setProperty("/sAppModus", "edit");
+    },
+
+    handleDeleteCreatePressed: function() {
+      // hier dann Termin löschen
+      console.log("Termin löschen");
+
+      var sPath = sap.ui.getCore().byId("CreateAppointment").getBindingContext().getPath();
+      this.getModel().remove(sPath, {
+        success: function(oData) {
+          console.log("Datensatz löschen:");
+          console.log(oData);
+          //PopUp schliessen + Erfolgsmeldung
+          //            this._initCreateApp();
+          this._oCreateAppointment.close();
+          sap.m.MessageToast.show(this.getView().getModel("i18n").getResourceBundle().getText("deleteAppSuccessMsg"));
+        }.bind(this),
+
+        error: function(oError) {
+          console.log(oError);
+          var sMessageSap = jQuery.parseJSON(oError.responseText).error.message.value;
+          var sMessage = this.getView().getModel("i18n").getResourceBundle().getText("deleteAppErrorMsg") + "!" + "\n\r " +
+            sMessageSap;
+          sap.m.MessageToast.show(sMessage, {
+            duration: 8000,
+            width: "20em"
+          });
+
+        }.bind(this)
+      });
+
+    },
+
+    handleDateTimeChange: function(oEvent) {
+      var oPicker = oEvent.getSource();
+      //var sValue = oEvent.getParameter("value");
+      var bValid = oEvent.getParameter("valid");
+      if (bValid) {
+        oPicker.setValueState(sap.ui.core.ValueState.None);
+      } else {
+        oPicker.setValueState(sap.ui.core.ValueState.Error);
+      }
+
+      var sPath = oEvent.getSource().getBindingContext().getPath() + "/" + oEvent.getSource().getBinding("value").getPath();
+      this.getModel().setProperty(sPath, oPicker.getDateValue());
+
+    },
+
+    handleStartDateTimeChange: function(oEvent) {
+      var oPicker = oEvent.getSource();
+      //var sValue = oEvent.getParameter("value");
+      var bValid = oEvent.getParameter("valid");
+      if (bValid) {
+        oPicker.setValueState(sap.ui.core.ValueState.None);
+      } else {
+        oPicker.setValueState(sap.ui.core.ValueState.Error);
+      }
+
+      //wenn der Start geändert wird soll sich automatisch auch das Ende ändern
+      var sDuration = this.getModel("appFragment").getProperty("/sDuration");
+      var sEndeNeu = (oPicker.getDateValue().getTime() + sDuration);
+      var oNewEnd = new Date(sEndeNeu);
+
+      var sPath = oEvent.getSource().getBindingContext().getPath() + "/" + oEvent.getSource().getBinding("value").getPath();
+      this.getModel().setProperty(sPath, oPicker.getDateValue()); //ist das Startdatum
+      //hier noch das berechnete Enddatum setzen - steht in oNewEnd
+      this.getModel().setProperty(oEvent.getSource().getBindingContext().getPath() + "/End", oNewEnd);
+
+    },
+
+    handleTextValueChange: function(oEvent) {
+      var sText = oEvent.getParameter("value");
+      var sPath = oEvent.getSource().getBindingContext().getPath() + "/" + oEvent.getSource().getBinding("value").getPath();
+      this.getModel().setProperty(sPath, sText);
+    },
+
+    //Ermittlen aller Reihen des Kalenders
+    //Der sPath des BindingContext jedes Appointments einer Reihe,  wird nach dem String aus sAufNr durchsucht. 
+    //Bei erfolgreicher Suche, wird dieses Appointment als Updatewürdig eingestuft und der entsprechende Datensatz des Appointments neu geladen.
+    //Spezialfall: Ein Appointment zu mehreren Prüfern zugeordnet und alle müssen die Aktualisierung bekommen.
+    //Björn Hage, 17.08.2017
+    _reloadAppointments: function(sAufNr) {
+      var rows = this.getView().byId("PlanningCalendar").mAggregations.rows;
+      for (var i = 0; i < rows.length; i++) {
+        var appointments = rows[i].mAggregations.appointments;
+        for (var i2 = 0; i2 < appointments.length; i2++) {
+          if (appointments[i2].getBindingContext().getPath().indexOf("Aufnr='" + sAufNr + "'") > -1) {
+            appointments[i2].getBindingContext().getModel().read(appointments[i2].getBindingContext().getPath(), null, null, false);
+
+          }
+        }
+      }
+
+    },
+
+    //Zeile eines SV neu laden - notwendig bei Terminänderung mit SV Wechsel
+    _reloadRows: function(sPernr) {
+      var rows = this.getView().byId("PlanningCalendar").getRows();
+      var sTerminnr = this._oCreateAppointment.getBindingContext().getProperty("Terminnr");
+      for (var i = 0; i < rows.length; i++) {
+
+        if (rows[i].getBindingContext().getProperty("Pernr") === sPernr) {
+          rows[i].getBinding("appointments").refresh();
+          // rows[i].getBindingContext().getModel().read("/PlanboardSet(Pernr='" + sPernr + "',Terminnr='" + sTerminnr + "',Aufnr='')",{
+          //  success : function (oData){
+          //    this.getModel().updateBindings(true);
+          //  }.bind(this)
+          // });
+          break;
+        }
+      }
+
+    },
+
+    //
+    _evaluateSubmitChangesREsult: function(oData, oProperties) {
+      var aBatchResponses = oData.__batchResponses;
+      var bError = false;
+
+      for (var i in aBatchResponses) {
+        if (aBatchResponses[i].hasOwnProperty("response")) {
+          if (parseInt(aBatchResponses[i].response.statusCode) >= 400) {
+            bError = true;
+            var oResponseBody = JSON.parse(aBatchResponses[i].response.body);
+            oProperties.error({
+              message: oResponseBody.error.message.value.replace(/&/g, ""),
+              response: aBatchResponses[i].response
+            });
+
+          }
+        }
+
+      }
+
+      if (!bError) {
+        oProperties.success();
+      }
+
+    },
+
+    //Änderungen im Backend speichern
+    _submitAppChanges: function() {
+      this.getModel().submitChanges({
+        success: function(oData) {
+          this._evaluateSubmitChangesREsult(oData, {
+            success: function() {
+              console.log("Datensatz geändert:");
+              console.log(oData);
+              //PopUp schliessen + Erfolgsmeldung
+              //            this._initCreateApp();
+              this._oChangeAppointment.close();
+              //Text je nach Modus holen - es gibt in diesem Fall nur edit
+              var sMessage;
+              //Appointments für den Inspektor nur neu lasen, wenn es einen Wechsel bei der Pernr gab
+              if (this.getModel("appFragment").getProperty("/sPernrChange") === "true") {
+                this._reloadRows(sap.ui.getCore().byId("ChangeAppInspectorSel").getSelectedKey());
+              }
+              //App mit mehreren Prüfern berücksichtigen, Aktualisierung auch für die anderen SV
+              var sAufnr = sap.ui.getCore().byId("Aufnr_Key").getValue();
+              this._reloadAppointments(sAufnr);
+
+              sMessage = this.getView().getModel("i18n").getResourceBundle().getText("changeApp2SuccessMsg");
+              sap.m.MessageToast.show(sMessage);
+              //sap.m.MessageToast.show(this.getView().getModel("i18n").getResourceBundle().getText("changeAppSuccessMsg"));
+            }.bind(this),
+
+            error: function(oError, o) {
+              console.log(oError);
+              console.log(oError.message);
+              //var sMessageSap = jQuery.parseJSON(oError.responseText).error.message.value;
+              var sMessageSap = oError.message;
+              var sMessageFiori;
+              sMessageFiori = this.getView().getModel("i18n").getResourceBundle().getText("changeApp2ErrorMsg");
+              var sMessage = sMessageFiori + "!" + "\n\r " + sMessageSap;
+              //var sMessage = this.getView().getModel("i18n").getResourceBundle().getText("changeAppErrorMsg") + "!" + "\n\r " + sMessageSap;
+              sap.m.MessageToast.show(sMessage, {
+                duration: 8000,
+                width: "20em"
+              });
+
+            }.bind(this)
+          });
+
+        }.bind(this)
+
+      });
+    },
+
+    //PopUp für Terminanlage initialisieren
+    _initCreateApp: function() {
+      //Bemerkung, Ort und Terminart löschen
+      var oComment = sap.ui.getCore().byId("CreateAppComment");
+      oComment.setValue();
+
+      var oLocation = sap.ui.getCore().byId("CreateAppLocation");
+      oLocation.setValue();
+
+      var oTart = sap.ui.getCore().byId("CreateAppTartSel");
+      oTart.setSelectedKey();
+    },
+
+    //berechnet die Kalenderwoche zu einem Datum
+    _getWeekNumber: function(oDateIn) {
+      var oDate = new Date(oDateIn);
+      // In JavaScript the Sunday has value 0 as return value of getDay() function. 
+      // So we have to order them first ascending from Monday to Sunday
+      // Monday: ((1+6) % 7) = 0
+      // Tuesday  ((2+6) % 7) = 1
+      // Wednesday: ((3+6) % 7) = 2
+      // Thursday:  ((4+6) % 7) = 3
+      // Friday: ((5+6) % 7) = 4
+      // Saturday:  ((6+6) % 7) = 5
+      // Sunday: ((0+6) % 7) = 6
+      // (3 - result) is necessary to get the Thursday of the current week.
+
+      // If we want to have Tuesday it would be (1-result)
+      var currentThursday = new Date(oDate.getTime() + (3 - ((oDate.getDay() + 6) % 7)) * 86400000);
+      // At the beginnig or end of a year the thursday could be in another year.
+      var yearOfThursday = currentThursday.getFullYear();
+
+      // Get first Thursday of the year
+      var firstThursday = new Date(new Date(yearOfThursday, 0, 4).getTime() + (3 - ((new Date(yearOfThursday, 0, 4).getDay() + 6) % 7)) *
+        86400000);
+
+      // +1 we start with week number 1
+      // +0.5 an easy and dirty way to round result (in combinationen with Math.floor)
+      var sWeekNumber = Math.floor(1 + 0.5 + (currentThursday.getTime() - firstThursday.getTime()) / 86400000 / 7);
+      return sWeekNumber;
+    },
+
+    _convertTartAlphaNum: function(sValue) {
+      /*
+    "Terminart
+      1 - Appointment           ZSO1
+      2 - Urlaub                TUR
+      3 - Krank                 KRA
+      4 - Feiertag              FT
+      5 - Freizeitausgleich     FZA
+      6 - Büro                  BÜR
+      7 - Betriebsrat           BR
+      8 - Auftrag               ZA11
+      9 - sonstige Abwesenheit  SO
+      10 - Reservierung         RES
+        20 - Tour                 TOUR
+        33   Manuelle Dispo       MAN
+      99 - sonstige Abw.
+    1, 20, 33 und 99 stehen nicht zur Auswahl
+    */
+
+      if (sValue === "TUR") {
+        return 2;
+      } else if (sValue === "KRA") {
+        return 3;
+      } else if (sValue === "FT") {
+        return 4;
+      } else if (sValue === "FZA") {
+        return 5;
+      } else if (sValue === "BÜR") {
+        return 6;
+      } else if (sValue === "BR") {
+        return 7;
+      } else if (sValue === "ZA11") {
+        return 8;
+      } else if (sValue === "SO") {
+        return 9;
+      } else if (sValue === "RES") {
+        return 10;
+      } else {
+        return 0; //Fehler
+      }
+
+    },
+
+    _msToTime: function(duration) {
+      var seconds = parseInt((duration / 1000) % 60),
+        minutes = parseInt((duration / (1000 * 60)) % 60),
+        hours = parseInt((duration / (1000 * 60 * 60)) % 24);
+
+      hours = (hours < 10) ? "0" + hours : hours;
+      minutes = (minutes < 10) ? "0" + minutes : minutes;
+      seconds = (seconds < 10) ? "0" + seconds : seconds;
+
+      //return hours + ":" + minutes + ":" + seconds;
+      return hours + minutes + seconds;
+    },
+
+    /* =========================================================== */
+    /* internal methods                                            */
+    /* =========================================================== */
+
+    /**
+     * Shows the selected item on the object page
+     * On phones a additional history entry is created
+     * @param {sap.m.ObjectListItem} oItem selected Item
+     * @private
+     */
+    _showObject: function(oItem) {
+      this.getRouter().navTo("object", {
+        objectId: oItem.getBindingContext().getProperty("Pernr")
+      });
+    },
+
+    /**
+     * Internal helper method to apply both filter and search state together on the list binding
+     * @param {object} oTableSearchState an array of filters for the search
+     * @private
+     */
+    _applySearch: function(oTableSearchState) {
+      var oTable = this.byId("table"),
+        oViewModel = this.getModel("worklistView");
+      oTable.getBinding("items").filter(oTableSearchState, "Application");
+      // changes the noDataText of the list in case there are no filter results
+      if (oTableSearchState.length !== 0) {
+        oViewModel.setProperty("/tableNoDataText", this.getResourceBundle().getText("worklistNoDataWithSearchText"));
+      }
+    }
+
+  });
+});
+//# sourceURL=http://vh01s0er3.netz.tuev-nord.de:8000/sap/bc/ui5_ui5/tng/is3s_plan/controller/Worklist.controller.js?eval
