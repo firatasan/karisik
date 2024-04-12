@@ -1,3 +1,5 @@
+```abap
+
 TYPES: BEGIN OF typ_kunnr,
          kunnr TYPE kunnr,
        END OF typ_kunnr.
@@ -47,6 +49,9 @@ not CDS lerde for all entries olmuyor range yapmak lazim
 *      WHERE cs_order = @mt_cs_order-cs_order.
 
     DATA lr_cs_order TYPE RANGE OF aufnr.
+
+
+```
 
     lr_cs_order = VALUE #( FOR ls_cs_order IN mt_cs_order ( sign = 'I' option = 'EQ' low = ls_cs_order-cs_order ) ).
 
