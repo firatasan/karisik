@@ -1,6 +1,5 @@
-´´´ABAP
-  
-  " EQART list box
+```abap
+" EQART list box
   SELECT * FROM 'searchhelptablename' INTO TABLE @DATA(lt_eqarts).
 
   DATA lt_vrm_values TYPE vrm_values.
@@ -22,4 +21,4 @@
             WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
   ENDIF.
 
-  ´´´
+```
